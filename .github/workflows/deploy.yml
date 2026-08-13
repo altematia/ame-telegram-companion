@@ -41,9 +41,6 @@ jobs:
           sudo apt-get install -y -qq sshpass
 
           umask 077
-          printf '%s\n' \
-            '109.172.6.81 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPhU9gjiHSCnoE7gc9z+GjgmpjEerFKIJyMaZr58D1uQ' \
-            > "$RUNNER_TEMP/known_hosts"
           printf 'TELEGRAM_BOT_TOKEN=%s\nOPENAI_API_KEY=%s\nLLM_MODEL=gpt-5.4-mini\n' \
             "$TELEGRAM_BOT_TOKEN" "$OPENAI_API_KEY" > "$RUNNER_TEMP/ame.env"
           tar \
@@ -56,46 +53,76 @@ jobs:
             --exclude='__pycache__' \
             -czf "$RUNNER_TEMP/ame.tar.gz" .
 
-      - name: Check VPS network reachability
+      - name: Detect verified SSH endpoint
+        id: ssh_endpoint
         shell: bash
         run: |
-          set -u
-          for port in 22 2022 2222 80 443 1500 8443; do
-            if timeout 6 bash -c "</dev/tcp/$VPS_HOST/$port" 2>/dev/null; then
-              echo "port $port: reachable"
-            else
-              echo "port $port: unavailable"
+          set -euo pipefail
+          PINNED_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPhU9gjiHSCnoE7gc9z+GjgmpjEerFKIJyMaZr58D1uQ'
+          SSH_PORT=''
+
+          for port in 22 2022 2222 443 8443 1500 80; do
+            scan="$(timeout 8 ssh-keyscan -T 5 -t ed25519 -p "$port" "$VPS_HOST" 2>/dev/null || true)"
+            if grep -Fq "$PINNED_KEY" <<<"$scan"; then
+              SSH_PORT="$port"
+              echo "verified SSH host key on port $port"
+              break
             fi
           done
+
+          if [[ -z "$SSH_PORT" ]]; then
+            for endpoint in \
+              "https://$VPS_HOST/" \
+              "https://$VPS_HOST:1500/ispmgr" \
+              "http://$VPS_HOST:1500/ispmgr" \
+              "https://$VPS_HOST:8443/"; do
+              status="$(curl --insecure --silent --show-error --output /dev/null \
+                --connect-timeout 5 --max-time 10 --write-out '%{http_code}' \
+                "$endpoint" 2>/dev/null || true)"
+              echo "$endpoint -> ${status:-unavailable}"
+            done
+            echo 'No endpoint presented the pinned SSH host key.' >&2
+            exit 1
+          fi
+
+          if [[ "$SSH_PORT" == '22' ]]; then
+            host_pattern="$VPS_HOST"
+          else
+            host_pattern="[$VPS_HOST]:$SSH_PORT"
+          fi
+          printf '%s %s\n' "$host_pattern" "$PINNED_KEY" > "$RUNNER_TEMP/known_hosts"
+          echo "ssh_port=$SSH_PORT" >> "$GITHUB_OUTPUT"
 
       - name: Audit VPS and upload release
         shell: bash
         run: |
           set -euo pipefail
+          SSH_PORT='${{ steps.ssh_endpoint.outputs.ssh_port }}'
           SSH_OPTIONS=(
             -o StrictHostKeyChecking=yes
             -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts"
             -o ConnectTimeout=20
           )
 
-          sshpass -e ssh "${SSH_OPTIONS[@]}" "$VPS_USER@$VPS_HOST" \
+          sshpass -e ssh -p "$SSH_PORT" "${SSH_OPTIONS[@]}" "$VPS_USER@$VPS_HOST" \
             'set -e; hostname; docker --version; docker compose version; test -d /opt; df -h / | tail -1'
-          sshpass -e scp "${SSH_OPTIONS[@]}" \
+          sshpass -e scp -P "$SSH_PORT" "${SSH_OPTIONS[@]}" \
             "$RUNNER_TEMP/ame.tar.gz" "$VPS_USER@$VPS_HOST:/tmp/ame.tar.gz"
-          sshpass -e scp "${SSH_OPTIONS[@]}" \
+          sshpass -e scp -P "$SSH_PORT" "${SSH_OPTIONS[@]}" \
             "$RUNNER_TEMP/ame.env" "$VPS_USER@$VPS_HOST:/tmp/ame.env"
 
       - name: Build and start isolated container
         shell: bash
         run: |
           set -euo pipefail
+          SSH_PORT='${{ steps.ssh_endpoint.outputs.ssh_port }}'
           SSH_OPTIONS=(
             -o StrictHostKeyChecking=yes
             -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts"
             -o ConnectTimeout=20
           )
 
-          sshpass -e ssh "${SSH_OPTIONS[@]}" "$VPS_USER@$VPS_HOST" 'bash -s' <<'REMOTE'
+          sshpass -e ssh -p "$SSH_PORT" "${SSH_OPTIONS[@]}" "$VPS_USER@$VPS_HOST" 'bash -s' <<'REMOTE'
           set -euo pipefail
           TARGET=/opt/ame-telegram-companion
           install -d -m 700 "$TARGET"
