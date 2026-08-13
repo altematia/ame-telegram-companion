@@ -1,0 +1,7 @@
+services:
+  ame:
+    build: .
+    container_name: ame-telegram-bot
+    restart: unless-stopped
+    env_file:
+      - .env

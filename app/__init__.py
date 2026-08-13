@@ -1,0 +1,1 @@
+"""Ame Telegram companion package."""
