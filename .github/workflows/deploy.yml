@@ -56,6 +56,18 @@ jobs:
             --exclude='__pycache__' \
             -czf "$RUNNER_TEMP/ame.tar.gz" .
 
+      - name: Check VPS network reachability
+        shell: bash
+        run: |
+          set -u
+          for port in 22 2022 2222 80 443 1500 8443; do
+            if timeout 6 bash -c "</dev/tcp/$VPS_HOST/$port" 2>/dev/null; then
+              echo "port $port: reachable"
+            else
+              echo "port $port: unavailable"
+            fi
+          done
+
       - name: Audit VPS and upload release
         shell: bash
         run: |
