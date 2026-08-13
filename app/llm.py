@@ -25,3 +25,6 @@ class AmeLLM:
         if not answer:
             raise RuntimeError("OpenAI вернул пустой ответ")
         return answer
+
+    async def close(self) -> None:
+        await self._client.close()

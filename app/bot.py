@@ -94,4 +94,7 @@ async def run_bot(settings: Settings) -> None:
         await bot.delete_webhook(drop_pending_updates=False)
         await dispatcher.start_polling(bot, ame=ame)
     finally:
-        await bot.session.close()
+        try:
+            await ame.close()
+        finally:
+            await bot.session.close()
