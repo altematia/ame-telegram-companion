@@ -60,6 +60,8 @@ git pull --ff-only
 docker compose up -d --build
 ```
 
+Продакшен-развёртывание на настроенный VPS также можно запустить вручную из вкладки GitHub Actions после добавления repository secrets `VPS_SSH_PASSWORD`, `TELEGRAM_BOT_TOKEN` и `OPENAI_API_KEY`.
+
 ## Структура
 
 ```text

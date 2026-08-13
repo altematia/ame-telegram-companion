@@ -1,0 +1,102 @@
+name: Deploy Ame to VPS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ame-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VPS_HOST: 109.172.6.81
+      VPS_USER: root
+      SSHPASS: ${{ secrets.VPS_SSH_PASSWORD }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+    steps:
+      - name: Check required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSHPASS"
+          test -n "$TELEGRAM_BOT_TOKEN"
+          test -n "$OPENAI_API_KEY"
+
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Prepare deployment package
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass
+
+          umask 077
+          printf '%s\n' \
+            '109.172.6.81 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPhU9gjiHSCnoE7gc9z+GjgmpjEerFKIJyMaZr58D1uQ' \
+            > "$RUNNER_TEMP/known_hosts"
+          printf 'TELEGRAM_BOT_TOKEN=%s\nOPENAI_API_KEY=%s\nLLM_MODEL=gpt-5.4-mini\n' \
+            "$TELEGRAM_BOT_TOKEN" "$OPENAI_API_KEY" > "$RUNNER_TEMP/ame.env"
+          tar \
+            --exclude=.git \
+            --exclude=.github \
+            --exclude=.env \
+            --exclude=.venv \
+            --exclude=work \
+            --exclude=outputs \
+            --exclude='__pycache__' \
+            -czf "$RUNNER_TEMP/ame.tar.gz" .
+
+      - name: Audit VPS and upload release
+        shell: bash
+        run: |
+          set -euo pipefail
+          SSH_OPTIONS=(
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts"
+            -o ConnectTimeout=20
+          )
+
+          sshpass -e ssh "${SSH_OPTIONS[@]}" "$VPS_USER@$VPS_HOST" \
+            'set -e; hostname; docker --version; docker compose version; test -d /opt; df -h / | tail -1'
+          sshpass -e scp "${SSH_OPTIONS[@]}" \
+            "$RUNNER_TEMP/ame.tar.gz" "$VPS_USER@$VPS_HOST:/tmp/ame.tar.gz"
+          sshpass -e scp "${SSH_OPTIONS[@]}" \
+            "$RUNNER_TEMP/ame.env" "$VPS_USER@$VPS_HOST:/tmp/ame.env"
+
+      - name: Build and start isolated container
+        shell: bash
+        run: |
+          set -euo pipefail
+          SSH_OPTIONS=(
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts"
+            -o ConnectTimeout=20
+          )
+
+          sshpass -e ssh "${SSH_OPTIONS[@]}" "$VPS_USER@$VPS_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          TARGET=/opt/ame-telegram-companion
+          install -d -m 700 "$TARGET"
+          tar -xzf /tmp/ame.tar.gz -C "$TARGET"
+          install -m 600 /tmp/ame.env "$TARGET/.env"
+          rm -f /tmp/ame.tar.gz /tmp/ame.env
+
+          cd "$TARGET"
+          docker compose config --quiet
+          docker compose up -d --build
+          sleep 8
+          docker compose ps
+          docker compose logs --no-color --tail=60 ame
+
+          test "$(docker inspect -f '{{.State.Running}}' ame-telegram-bot)" = true
+          REMOTE
